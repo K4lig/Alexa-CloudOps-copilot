@@ -78,3 +78,45 @@ async def test_ticket_rechaza_cambios_despues_del_si(alexa):
     code = (await ask(alexa, "create_incident_ticket", TICKET))["details"]["confirmation_code"]
     tampered = {**TICKET, "severity": 1, "confirmation_code": code}
     assert (await ask(alexa, "create_incident_ticket", tampered))["details"]["status"] == "rejected"
+
+# ---------------------------------------------------------------- CloudWatch, sin tocar AWS
+from datetime import datetime, timedelta, timezone
+
+import boto3
+from moto import mock_aws
+
+import server
+
+
+@pytest.fixture
+def fake_aws(monkeypatch):
+    """Un CloudWatch de mentira en memoria: nada sale a internet ni cuesta dinero."""
+    monkeypatch.setenv("AWS_DEFAULT_REGION", "us-east-1")
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "testing")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "testing")
+    monkeypatch.setattr(server, "DATA_SOURCE", "cloudwatch")
+    with mock_aws():
+        yield boto3.client("cloudwatch")
+
+
+def put(cw, service, minutes_ago, requests, errors):
+    when = datetime.now(timezone.utc) - timedelta(minutes=minutes_ago)
+    dims = [{"Name": "Service", "Value": service}]
+    cw.put_metric_data(Namespace=server.NAMESPACE, MetricData=[
+        {"MetricName": "Requests", "Dimensions": dims, "Value": requests, "Timestamp": when},
+        {"MetricName": "Errors", "Dimensions": dims, "Value": errors, "Timestamp": when},
+        {"MetricName": "LatencyMs", "Dimensions": dims, "Value": 2000, "Timestamp": when},
+    ])
+
+
+async def test_cloudwatch_detecta_degradacion(fake_aws, alexa):
+    put(fake_aws, "checkout-api", 30, requests=500, errors=2)     # la hora anterior: sana
+    put(fake_aws, "checkout-api", 3, requests=500, errors=60)     # ahora: 12 % de errores
+    answer = await ask(alexa, "diagnose_service", {"service": "checkout-api"})
+    assert "degraded" in answer["speech"]
+    assert answer["details"]["source"] == "cloudwatch"
+
+
+async def test_cloudwatch_sin_trafico(fake_aws, alexa):
+    answer = await ask(alexa, "diagnose_service", {"service": "checkout-api"})
+    assert "couldn't find recent data" in answer["speech"]

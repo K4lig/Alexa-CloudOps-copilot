@@ -2,8 +2,12 @@
 
 import hashlib
 import json
+import os
 import secrets
 import time
+from datetime import datetime, timedelta, timezone
+
+import boto3
 
 from pydantic import BaseModel, Field
 from mcp.server.mcpserver import MCPServer
@@ -43,21 +47,73 @@ CRITICAL_CVES = [
 ]
 
 # 3. Tool - La descripcion es lo que Alexa lee para decidir si la usa.
+
+# ---------------------------------------------------------------- datos reales (CloudWatch)
+DATA_SOURCE = os.getenv("DATA_SOURCE", "demo")      # "demo" o "cloudwatch"
+NAMESPACE = "CloudOpsCopilot/Demo"
+DEFAULT_BASELINE = 0.5                               # si todavía no hay historial
+
+
+def _sum_metric(cloudwatch, service: str, metric: str, stat: str, start: datetime, end: datetime) -> list[float]:
+    """Pide a CloudWatch una métrica de un servicio en una ventana de tiempo."""
+    period = int((end - start).total_seconds())
+    response = cloudwatch.get_metric_data(
+        MetricDataQueries=[{
+            "Id": "m",
+            "MetricStat": {
+                "Metric": {"Namespace": NAMESPACE, "MetricName": metric,
+                           "Dimensions": [{"Name": "Service", "Value": service}]},
+                "Period": period,
+                "Stat": stat,
+            },
+        }],
+        StartTime=start,
+        EndTime=end,
+    )
+    return response["MetricDataResults"][0]["Values"]
+
+
+def cloudwatch_health(service: str) -> dict | None:
+    """Errores y lentitud de los últimos 10 minutos, comparados con la hora anterior."""
+    cloudwatch = boto3.client("cloudwatch")
+    now = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+    recent_start, baseline_start = now - timedelta(minutes=10), now - timedelta(minutes=70)
+
+    requests = sum(_sum_metric(cloudwatch, service, "Requests", "Sum", recent_start, now))
+    if requests == 0:
+        return None                                  # sin tráfico: no sabemos nada de ese servicio
+    errors = sum(_sum_metric(cloudwatch, service, "Errors", "Sum", recent_start, now))
+    latency = _sum_metric(cloudwatch, service, "LatencyMs", "Average", recent_start, now)
+
+    old_requests = sum(_sum_metric(cloudwatch, service, "Requests", "Sum", baseline_start, recent_start))
+    old_errors = sum(_sum_metric(cloudwatch, service, "Errors", "Sum", baseline_start, recent_start))
+    baseline = round(100 * old_errors / old_requests, 1) if old_requests else DEFAULT_BASELINE
+
+    last_deploy = next((d["id"] for d in FAILED_DEPLOYMENTS if d["service"] == service), "unknown")
+    return {
+        "error_rate": round(100 * errors / requests, 1),
+        "baseline": max(baseline, 0.1),
+        "latency_ms": round(latency[0]) if latency else None,
+        "requests_10min": int(requests),
+        "last_deploy": last_deploy,
+        "source": "cloudwatch",
+    }
+
+
 @mcp.tool(
     description="Explain whether a cloud service is healthy or degraded and why.",
     annotations=READ_ONLY,
 )
 def diagnose_service(service: str) -> Answer:
-    data = SERVICES.get(service)
+    data = cloudwatch_health(service) if DATA_SOURCE == "cloudwatch" else SERVICES.get(service)
     if data is None:
-        return Answer(speech=f"I couldn't find a service called {service}.",
+        return Answer(speech=f"I couldn't find recent data for a service called {service}.",
                       details={"known_services": list(SERVICES)})
     if data["error_rate"] > data["baseline"] * 3:
         speech = (f"{service} is degraded: error rate is about {data['error_rate']:.0f} percent "
                   f"versus {data['baseline']} normally, right after deployment {data['last_deploy']}.")
         return Answer(speech=speech, details={"status": "degraded", **data})
     return Answer(speech=f"{service} looks healthy.", details={"status": "healthy", **data})
-    return Answer(speech=speech, details={"Vulnerabilities": found})
 
 @mcp.tool(
     description="List deployments that failed recently. Use for questions like 'what failed today?'.",
