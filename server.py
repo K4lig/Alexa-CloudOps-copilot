@@ -99,21 +99,46 @@ def cloudwatch_health(service: str) -> dict | None:
         "source": "cloudwatch",
     }
 
+ERROR_SLO = 5.0          # objetivo de servicio: más de 5 % de errores es inaceptable, sea "normal" o no
+
+
+def resolve_service(name: str) -> str:
+    """Convierte lo que dice la gente ("checkout") en el nombre real ("checkout-api")."""
+    name = name.strip().lower()
+    if name in SERVICES:
+        return name
+    for real in SERVICES:
+        if real.startswith(name) or name in real:
+            return real
+    return name
+
 
 @mcp.tool(
-    description="Explain whether a cloud service is healthy or degraded and why.",
+    description=(
+        "Explain whether a cloud service is healthy or degraded and why. "
+        "Known services: checkout-api, inventory-svc, web-frontend."
+    ),
     annotations=READ_ONLY,
 )
 def diagnose_service(service: str) -> Answer:
+    service = resolve_service(service)
     data = cloudwatch_health(service) if DATA_SOURCE == "cloudwatch" else SERVICES.get(service)
     if data is None:
         return Answer(speech=f"I couldn't find recent data for a service called {service}.",
                       details={"known_services": list(SERVICES)})
-    if data["error_rate"] > data["baseline"] * 3:
+
+    jumped = data["error_rate"] > max(2.0, data["baseline"] * 3)     # cambió mucho vs. lo normal
+    over_slo = data["error_rate"] >= ERROR_SLO                         # supera el objetivo, aunque sea "lo normal"
+    if jumped:
         speech = (f"{service} is degraded: error rate is about {data['error_rate']:.0f} percent "
                   f"versus {data['baseline']} normally, right after deployment {data['last_deploy']}.")
-        return Answer(speech=speech, details={"status": "degraded", **data})
-    return Answer(speech=f"{service} looks healthy.", details={"status": "healthy", **data})
+    elif over_slo:
+        speech = (f"{service} is degraded: error rate is about {data['error_rate']:.0f} percent, "
+                  f"above the {ERROR_SLO:.0f} percent objective. It has been this bad for over an hour, "
+                  f"starting around deployment {data['last_deploy']}.")
+    else:
+        return Answer(speech=f"{service} looks healthy.", details={"status": "healthy", **data})
+    return Answer(speech=speech, details={"status": "degraded", **data})
 
 @mcp.tool(
     description="List deployments that failed recently. Use for questions like 'what failed today?'.",

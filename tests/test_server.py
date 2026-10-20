@@ -120,3 +120,14 @@ async def test_cloudwatch_detecta_degradacion(fake_aws, alexa):
 async def test_cloudwatch_sin_trafico(fake_aws, alexa):
     answer = await ask(alexa, "diagnose_service", {"service": "checkout-api"})
     assert "couldn't find recent data" in answer["speech"]
+
+async def test_entiende_nombres_cortos(alexa):
+    answer = await ask(alexa, "diagnose_service", {"service": "checkout"})
+    assert "checkout-api is degraded" in answer["speech"]
+
+
+async def test_cloudwatch_falla_larga_supera_slo(fake_aws, alexa):
+    put(fake_aws, "checkout-api", 30, requests=500, errors=60)    # la hora anterior también iba mal
+    put(fake_aws, "checkout-api", 3, requests=500, errors=60)
+    answer = await ask(alexa, "diagnose_service", {"service": "checkout-api"})
+    assert "above the 5 percent objective" in answer["speech"]
