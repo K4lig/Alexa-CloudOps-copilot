@@ -1,4 +1,4 @@
-"""Alexa simulada: un agente de Amazon Bedrock (Strands) que usa tu servidor MCP.
+"""Alexa simulada en la terminal: un agente de Strands que usa tu servidor MCP.
 
     python alexa_sim/agent.py                       # servidor en http://127.0.0.1:8000/mcp
     MCP_URL=https://.../mcp python alexa_sim/agent.py
@@ -6,13 +6,18 @@
 Escribe preguntas como "Why is checkout degraded?". Escribe "exit" para salir.
 """
 
+import logging
 import os
+from pathlib import Path
 
 from strands import Agent
 from strands.tools.mcp import MCPClient
 
+# Los modelos de razonamiento (gpt-oss en Groq) hacen que Strands avise en cada turno; es inofensivo.
+logging.getLogger("strands.models.openai").setLevel(logging.ERROR)
+
 MCP_URL = os.getenv("MCP_URL", "http://127.0.0.1:8000/mcp")
-MODEL_PROVIDER = os.getenv("MODEL_PROVIDER", "groq")          # "bedrock" u "ollama"
+MODEL_PROVIDER = os.getenv("MODEL_PROVIDER", "groq")          # "groq", "bedrock" u "ollama"
 
 
 def build_model():
@@ -30,13 +35,8 @@ def build_model():
         region_name=os.getenv("AWS_REGION", "us-east-1"),
     )
 
-SYSTEM_PROMPT = """You are Alexa, a voice assistant helping an on-call cloud engineer.
-Use the CloudOps tools to answer. When a tool returns a 'speech' field, say it almost word
-for word: short, plain English, no lists, no markdown.
-Creating a ticket is a write action. First call create_incident_ticket WITHOUT a
-confirmation_code, read the preview to the user and ask for confirmation. Only call it again
-with the confirmation_code if the user's latest message clearly says yes. If they say no,
-do not create anything. Never invent a confirmation code."""
+# El mismo prompt lo usa voice-mcp-sim (SYSTEM_PROMPT_FILE=alexa_sim/prompt.txt).
+SYSTEM_PROMPT = (Path(__file__).parent / "prompt.txt").read_text()
 
 
 def main() -> None:
