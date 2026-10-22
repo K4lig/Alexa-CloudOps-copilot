@@ -84,3 +84,14 @@ Severity: **blocker** (could not continue) | **major** (lost more than 1 hour) |
 - **Workaround:** voice-mcp-sim records the audio and transcribes it on the server with Whisper (Groq) when browser speech fails or does not answer within 2.5 seconds.
 - **Suggestion:** For voice demos, don't rely only on browser speech recognition.
 
+## 8. Streaming gpt-oss on Groq repeated replies and skipped tools
+- **Date:** 2026-10-21
+- **Tool:** Strands Agents SDK (`OpenAIModel`) + Groq `openai/gpt-oss-120b`
+- **Task:** Multi-turn voice conversation with tool calls.
+- **Expected:** One answer per turn, backed by a tool call.
+- **Actual:** Some answers came back twice in the same text ("X.X."), and follow-up questions were answered from conversation history without calling a tool.
+- **Severity:** major
+- **Workaround:** `OpenAIModel(..., stream=False)`, a prompt rule to always call a tool for live data, and a guard that collapses an exactly duplicated reply.
+- **Suggestion:** Document provider-specific streaming quirks for OpenAI-compatible endpoints in Strands.
+
+
