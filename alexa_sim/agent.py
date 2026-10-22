@@ -28,6 +28,7 @@ def build_model():
             client_args={"api_key": os.environ["GROQ_API_KEY"], "base_url": "https://api.groq.com/openai/v1"},
             model_id=os.getenv("GROQ_MODEL", "openai/gpt-oss-120b"),
             params={"temperature": 0.2},
+            stream=False,                        # en streaming, gpt-oss en Groq a veces repite la respuesta
         )
     from strands.models import BedrockModel
     return BedrockModel(
