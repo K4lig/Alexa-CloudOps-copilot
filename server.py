@@ -113,20 +113,11 @@ def resolve_service(name: str) -> str:
     return name
 
 
-@mcp.tool(
-    description=(
-        "Explain whether a cloud service is healthy or degraded and why. "
-        "Known services: checkout-api, inventory-svc, web-frontend."
-    ),
-    annotations=READ_ONLY,
-)
-def diagnose_service(service: str) -> Answer:
-    service = resolve_service(service)
+def assess(service: str) -> dict | None:
+    """Revisa un servicio y decide: sano o degradado, con la frase para decir."""
     data = cloudwatch_health(service) if DATA_SOURCE == "cloudwatch" else SERVICES.get(service)
     if data is None:
-        return Answer(speech=f"I couldn't find recent data for a service called {service}.",
-                      details={"known_services": list(SERVICES)})
-
+        return None
     jumped = data["error_rate"] > max(2.0, data["baseline"] * 3)     # cambió mucho vs. lo normal
     over_slo = data["error_rate"] >= ERROR_SLO                         # supera el objetivo, aunque sea "lo normal"
     if jumped:
@@ -137,8 +128,71 @@ def diagnose_service(service: str) -> Answer:
                   f"above the {ERROR_SLO:.0f} percent objective. It has been this bad for over an hour, "
                   f"starting around deployment {data['last_deploy']}.")
     else:
-        return Answer(speech=f"{service} looks healthy.", details={"status": "healthy", **data})
-    return Answer(speech=speech, details={"status": "degraded", **data})
+        return {"status": "healthy", "speech": f"{service} looks healthy.", **data}
+    return {"status": "degraded", "speech": speech, **data}
+
+
+def spoken_list(items: list[str]) -> str:
+    """["a", "b", "c"] -> "a, b, and c": así se enumera en voz alta."""
+    if len(items) <= 2:
+        return " and ".join(items)
+    return ", ".join(items[:-1]) + ", and " + items[-1]
+
+
+ORDINALS = ["First", "Second", "Third", "Fourth", "Fifth"]
+
+
+def spoken_steps(items: list[str]) -> str:
+    """Elementos largos, uno por frase: "First, ... Second, ..." se entiende mejor al oído."""
+    if len(items) == 1:
+        return items[0][0].upper() + items[0][1:] + "."
+    return " ".join(f"{ORDINALS[i] if i < len(ORDINALS) else 'Also'}, {item}." for i, item in enumerate(items))
+
+
+@mcp.tool(
+    description=(
+        "Explain whether ONE cloud service is healthy or degraded and why. "
+        "Known services: checkout-api, inventory-svc, web-frontend."
+    ),
+    annotations=READ_ONLY,
+)
+def diagnose_service(service: str) -> Answer:
+    service = resolve_service(service)
+    result = assess(service)
+    if result is None:
+        return Answer(speech=f"I couldn't find recent data for a service called {service}.",
+                      details={"known_services": list(SERVICES)})
+    speech = result.pop("speech")
+    return Answer(speech=speech, details=result)
+
+
+@mcp.tool(
+    description=(
+        "Check ALL cloud services at once. Use for 'list the services', 'which services are degraded?', "
+        "'how is everything?' or any overview question."
+    ),
+    annotations=READ_ONLY,
+)
+def service_overview() -> Answer:
+    results = {name: assess(name) for name in SERVICES}
+    degraded = [n for n, r in results.items() if r and r["status"] == "degraded"]
+    healthy = [n for n, r in results.items() if r and r["status"] == "healthy"]
+    no_data = [n for n, r in results.items() if r is None]
+
+    if degraded:
+        parts = [f"{n} at about {results[n]['error_rate']:.0f} percent errors" for n in degraded]
+        speech = f"{len(degraded)} of {len(SERVICES)} services {'is' if len(degraded) == 1 else 'are'} degraded: {spoken_list(parts)}."
+        if healthy:
+            speech += f" {spoken_list(healthy)} {'looks' if len(healthy) == 1 else 'look'} healthy."
+    elif healthy:
+        speech = f"All {len(healthy)} services with data look healthy: {spoken_list(healthy)}."
+    else:
+        speech = "I have no recent data for any service."
+    if no_data and (degraded or healthy):
+        speech += f" No recent data for {spoken_list(no_data)}."
+    details = {n: (r["status"] if r else "no_data") for n, r in results.items()}
+    return Answer(speech=speech, details={"services": details})
+
 
 @mcp.tool(
     description="List deployments that failed recently. Use for questions like 'what failed today?'.",
@@ -148,9 +202,9 @@ def list_failed_deployments(since_hours: int = 24) -> Answer:
     failed = [d for d in FAILED_DEPLOYMENTS if d["hours_ago"] <= since_hours]
     if not failed:
         return Answer(speech=f"No deployments failed in the last {since_hours} hours.")
-    first = failed[0]
-    speech = (f"{len(failed)} deployments failed in the last {since_hours} hours. "
-              f"The most recent is {first['service']}, deployment {first['id']}: {first['reason']}.")
+    items = [f"{d['service']} deployment {d['id']}, {d['hours_ago']} hours ago: {d['reason']}" for d in failed]
+    noun = "deployment" if len(failed) == 1 else "deployments"
+    speech = f"{len(failed)} {noun} failed in the last {since_hours} hours. {spoken_steps(items)}"
     return Answer(speech=speech, details={"deployments": failed})
 
 
@@ -162,9 +216,9 @@ def check_critical_cves(min_cvss: float = 9.0) -> Answer:
     found = [c for c in CRITICAL_CVES if c["cvss"] >= min_cvss]
     if not found:
         return Answer(speech="Good news: no critical vulnerabilities affect production.")
-    worst = found[0]
-    speech = (f"Yes, {len(found)} critical vulnerabilities affect production. The worst is "
-              f"{worst['id'].replace('-', ' ')}, in {worst['component']}, used by {worst['service']}.")
+    items = [f"{c['id'].replace('-', ' ')} in {c['component']}, used by {c['service']}" for c in found]
+    noun = "vulnerability affects" if len(found) == 1 else "vulnerabilities affect"
+    speech = f"Yes, {len(found)} critical {noun} production. {spoken_steps(items)}"
     return Answer(speech=speech, details={"vulnerabilities": found})
 
 PENDING: dict[str, tuple[str, float]] = {}   # código -> (huella del ticket, hora de vencimiento)

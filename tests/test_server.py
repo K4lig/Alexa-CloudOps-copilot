@@ -26,10 +26,10 @@ async def ask(client, tool, args=None):
     return result.structured_content
 
 
-async def test_hay_cuatro_tools(alexa):
+async def test_hay_cinco_tools(alexa):
     tools = (await alexa.list_tools()).tools
-    assert {t.name for t in tools} == {
-        "diagnose_service", "list_failed_deployments", "check_critical_cves", "create_incident_ticket"}
+    assert {t.name for t in tools} == {"diagnose_service", "service_overview", "list_failed_deployments",
+                                       "check_critical_cves", "create_incident_ticket"}
 
 
 async def test_servicio_degradado(alexa):
@@ -50,11 +50,12 @@ async def test_servicio_que_no_existe(alexa):
 async def test_despliegues_fallidos(alexa):
     answer = await ask(alexa, "list_failed_deployments")
     assert answer["speech"].startswith("2 deployments failed")
+    assert "checkout-api deployment 482" in answer["speech"] and "inventory-svc deployment 1290" in answer["speech"]
 
 
 async def test_cves_criticas(alexa):
     answer = await ask(alexa, "check_critical_cves")
-    assert "CVE 2021 44228" in answer["speech"]
+    assert "CVE 2021 44228" in answer["speech"] and "CVE 2024 3094" in answer["speech"]
 
 
 async def test_ticket_pide_permiso_y_luego_crea(alexa):
@@ -131,3 +132,17 @@ async def test_cloudwatch_falla_larga_supera_slo(fake_aws, alexa):
     put(fake_aws, "checkout-api", 3, requests=500, errors=60)
     answer = await ask(alexa, "diagnose_service", {"service": "checkout-api"})
     assert "above the 5 percent objective" in answer["speech"]
+
+
+async def test_resumen_nombra_los_degradados(alexa):
+    answer = await ask(alexa, "service_overview")
+    assert answer["speech"].startswith("1 of 3 services is degraded: checkout-api at about 12 percent errors.")
+    assert "inventory-svc and web-frontend look healthy" in answer["speech"]
+    assert answer["details"]["services"]["checkout-api"] == "degraded"
+
+
+async def test_resumen_con_cloudwatch_sin_datos(fake_aws, alexa):
+    put(fake_aws, "checkout-api", 3, requests=500, errors=60)
+    answer = await ask(alexa, "service_overview")
+    assert "checkout-api" in answer["speech"]
+    assert "No recent data for inventory-svc and web-frontend" in answer["speech"]
