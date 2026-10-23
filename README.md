@@ -51,7 +51,7 @@ flowchart LR
   10 seconds; `--chaos` makes `checkout-api` start failing.
 - **`alexa_sim/`**: a simulated Alexa in the terminal, built with Strands Agents.
   `prompt.txt` holds the voice rules shared with the web version.
-- **[voice-mcp-sim](https://github.com/K4lig/voice-mcp-sim)**: the open-source companion, a
+- **[voice-mcp-sim](https://github.com/K4lig/voice-mcp-simulated)**: the open-source companion, a
   browser voice assistant (speech in, Amazon Polly voice out, live tool-call panel) for
   testing this or any MCP server.
 
@@ -81,7 +81,7 @@ export GROQ_API_KEY="..."                       # keep it in .env, never commit 
 python alexa_sim/agent.py
 ```
 
-**Voice, in the browser**, with [voice-mcp-sim](https://github.com/K4lig/voice-mcp-sim):
+**Voice, in the browser**, with [voice-mcp-sim](https://github.com/K4lig/voice-mcp-simulated):
 
 ```bash
 MCP_URL=http://127.0.0.1:8000/mcp MODEL_PROVIDER=groq \
