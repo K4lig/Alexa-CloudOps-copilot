@@ -14,6 +14,12 @@ TICKET = {"title": "checkout-api degraded", "description": "Error rate 12 percen
 def anyio_backend():
     return "asyncio"
 
+@pytest.fixture(autouse=True)
+def fresh_graph(tmp_path, monkeypatch):
+    """Cada prueba arranca con un grafo nuevo en una carpeta temporal: no toca knowledge/graph.json."""
+    import server
+    from knowledge import KnowledgeGraph
+    monkeypatch.setattr(server, "GRAPH", KnowledgeGraph(tmp_path / "graph.json"))
 
 @pytest.fixture
 async def alexa():
@@ -26,10 +32,10 @@ async def ask(client, tool, args=None):
     return result.structured_content
 
 
-async def test_hay_cinco_tools(alexa):
+async def test_hay_siete_tools(alexa):
     tools = (await alexa.list_tools()).tools
     assert {t.name for t in tools} == {"diagnose_service", "service_overview", "list_failed_deployments",
-                                       "check_critical_cves", "create_incident_ticket"}
+                                       "check_critical_cves", "create_incident_ticket", "recall", "remember"}
 
 
 async def test_servicio_degradado(alexa):
@@ -146,3 +152,27 @@ async def test_resumen_con_cloudwatch_sin_datos(fake_aws, alexa):
     answer = await ask(alexa, "service_overview")
     assert "checkout-api" in answer["speech"]
     assert "No recent data for inventory-svc and web-frontend" in answer["speech"]
+
+async def test_diagnostico_separa_causa_e_impacto(alexa):
+    answer = await ask(alexa, "diagnose_service", {"service": "checkout-api"})
+    assert "inventory-svc is healthy, so the cause is likely in checkout-api itself" in answer["speech"]
+    assert "This also affects web-frontend" in answer["speech"]
+
+
+async def test_aprende_de_cada_ticket(alexa):
+    first = await ask(alexa, "create_incident_ticket", TICKET)
+    done = await ask(alexa, "create_incident_ticket", {**TICKET, "confirmation_code": first["details"]["confirmation_code"]})
+    bug = done["details"]["ticket_id"]
+    assert f"ticket:{bug} CAUSED_BY deploy:482" in done["details"]["learned"]
+    again = await ask(alexa, "diagnose_service", {"service": "checkout-api"})
+    assert f"A similar incident was filed before: bug {bug}" in again["speech"]
+
+
+async def test_recuerda_y_sobrevive_reinicios(alexa):
+    import server
+    from knowledge import KnowledgeGraph
+    await ask(alexa, "remember", {"subject": "checkout", "fact": "A rollback to deployment 481 fixed it last time"})
+    reborn = KnowledgeGraph(server.GRAPH.path)              # como si el servidor se reiniciara
+    assert any(p.get("text") == "A rollback to deployment 481 fixed it last time." for p in reborn.nodes.values())
+    answer = await ask(alexa, "recall", {"topic": "checkout-api"})
+    assert "rollback to deployment 481" in answer["speech"]

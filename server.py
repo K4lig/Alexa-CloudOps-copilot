@@ -12,6 +12,7 @@ import boto3
 from pydantic import BaseModel, Field
 from mcp.server.mcpserver import MCPServer
 from mcp.types import ToolAnnotations
+from knowledge import KnowledgeGraph, ago
 
 # 1. Crear el servidor - "instruccions" es lo primero que va a leer el cliente en este caso Alexa.
 
@@ -49,6 +50,7 @@ CRITICAL_CVES = [
 # 3. Tool - La descripcion es lo que Alexa lee para decidir si la usa.
 
 # ---------------------------------------------------------------- datos reales (CloudWatch)
+GRAPH = KnowledgeGraph()
 DATA_SOURCE = os.getenv("DATA_SOURCE", "demo")      # "demo" o "cloudwatch"
 NAMESPACE = "CloudOpsCopilot/Demo"
 DEFAULT_BASELINE = 0.5                               # si todavía no hay historial
@@ -163,8 +165,34 @@ def diagnose_service(service: str) -> Answer:
         return Answer(speech=f"I couldn't find recent data for a service called {service}.",
                       details={"known_services": list(SERVICES)})
     speech = result.pop("speech")
+    if result["status"] == "degraded":
+        context, facts = graph_context(service)
+        speech = f"{speech} {context}".strip()
+        result["knowledge"] = facts
     return Answer(speech=speech, details=result)
 
+def graph_context(service: str) -> tuple[str, dict]:
+    """Lo que el grafo agrega a un diagnóstico: ¿la causa viene de una dependencia? ¿a quién afecta?"""
+    deps = [d for d in GRAPH.out(service, "DEPENDS_ON") if d in SERVICES]
+    bad_deps = [d for d in deps if (assess(d) or {}).get("status") == "degraded"]
+    impacted = GRAPH.dependents(service)
+    past = [t for t in GRAPH.into(service, "ABOUT") if t.startswith("ticket:")]
+    parts = []
+    if bad_deps:
+        parts.append(f"Its dependency {spoken_list(bad_deps)} is also degraded and may be the root cause.")
+    elif deps:
+        parts.append(f"Its dependency {spoken_list(deps)} is healthy, so the cause is likely in {service} itself.")
+    if impacted:
+        parts.append(f"This also affects {spoken_list(impacted)}.")
+    if past:
+        last = GRAPH.nodes[past[-1]]
+        parts.append(f"A similar incident was filed before: bug {past[-1].split(':')[1]}, {ago(last.get('created', time.time()))}.")
+    notes = [GRAPH.nodes[n]["text"] for n in GRAPH.into(service, "ABOUT") if n.startswith("note:")]
+    if notes:
+        parts.append(f"Team note: {notes[-1]}")
+    facts = {"depends_on": deps, "degraded_dependencies": bad_deps, "impacted": impacted,
+             "past_tickets": past, "notes": notes}
+    return " ".join(parts), facts
 
 @mcp.tool(
     description=(
@@ -223,7 +251,7 @@ def check_critical_cves(min_cvss: float = 9.0) -> Answer:
 
 PENDING: dict[str, tuple[str, float]] = {}   # código -> (huella del ticket, hora de vencimiento)
 CODE_TTL_SECONDS = 300
-_next_ticket = 4711
+_next_ticket = max([4710] + [int(n.split(":")[1]) for n in GRAPH.nodes if n.startswith("ticket:")]) + 1
 
 
 def _fingerprint(title: str, description: str, severity: int) -> str:
@@ -270,8 +298,85 @@ def create_incident_ticket(
 
     ticket_id = _next_ticket
     _next_ticket += 1
+    learned = learn_from_ticket(ticket_id, title, description, severity)
     return Answer(speech=f"Done. Bug {ticket_id} is created with severity {severity}.",
-                  details={"status": "created", "ticket_id": ticket_id})
+                  details={"status": "created", "ticket_id": ticket_id, "learned": learned})
+
+
+def learn_from_ticket(ticket_id: int, title: str, description: str, severity: int) -> list[str]:
+    """Cada ticket queda en el grafo, unido al servicio y al despliegue que lo causó."""
+    node = f"ticket:{ticket_id}"
+    GRAPH.add_node(node, type="ticket", title=title, severity=severity, created=time.time())
+    text = f"{title} {description}"
+    learned = []
+    for service in GRAPH.mentioned_services(text) or [resolve_service(w) for w in text.split() if resolve_service(w) in SERVICES][:1]:
+        GRAPH.add_edge(node, "ABOUT", service)
+        learned.append(f"{node} ABOUT {service}")
+        for deploy in GRAPH.into(service, "DEPLOYED_TO"):
+            if deploy.split(":")[1] in text or (assess(service) or {}).get("last_deploy") == deploy.split(":")[1]:
+                GRAPH.add_edge(node, "CAUSED_BY", deploy)
+                learned.append(f"{node} CAUSED_BY {deploy}")
+    return learned
+
+@mcp.tool(
+    description=(
+        "Recall what the team already knows about a service, deployment, ticket or CVE: owner team, "
+        "dependencies, what it affects, past incidents and saved notes. Use for 'what do we know about X?', "
+        "'what depends on X?', 'what happened last time?'."
+    ),
+    annotations=READ_ONLY,
+)
+def recall(topic: str) -> Answer:
+    node = GRAPH.find(topic)
+    if node is None:
+        return Answer(speech=f"I don't know anything about {topic} yet.", details={"found": False})
+    props = GRAPH.nodes[node]
+    kind = props.get("type")
+    notes = [GRAPH.nodes[n]["text"] for n in GRAPH.into(node, "ABOUT") if n.startswith("note:")]
+    tickets = [n for n in GRAPH.into(node, "ABOUT") + GRAPH.into(node, "CAUSED_BY") if n.startswith("ticket:")]
+    parts = []
+    if kind == "service":
+        parts.append(f"{node} is owned by the {props.get('team', 'unknown').replace('-', ' ')}.")
+        if deps := GRAPH.out(node, "DEPENDS_ON"):
+            parts.append(f"It depends on {spoken_list(deps)}.")
+        if users := GRAPH.dependents(node):
+            parts.append(f"If it fails, {spoken_list(users)} {'is' if len(users) == 1 else 'are'} affected.")
+        if cves := GRAPH.into(node, "AFFECTS"):
+            parts.append(f"It is exposed to {spoken_list([c.replace('-', ' ') for c in cves])}.")
+    elif kind == "deployment":
+        parts.append(f"Deployment {node.split(':')[1]} went to {spoken_list(GRAPH.out(node, 'DEPLOYED_TO'))}: {props.get('reason', 'no details')}.")
+    elif kind == "ticket":
+        about = GRAPH.out(node, "ABOUT")
+        cause = GRAPH.out(node, "CAUSED_BY")
+        parts.append(f"Bug {node.split(':')[1]}, {props.get('title')}, was filed {ago(props.get('created', time.time()))}"
+                     + (f" about {spoken_list(about)}" if about else "")
+                     + (f", caused by deployment {cause[0].split(':')[1]}" if cause else "") + ".")
+    elif kind == "cve":
+        parts.append(f"{node.replace('-', ' ')} has CVSS {props.get('cvss')} in {props.get('component')} "
+                     f"and affects {spoken_list(GRAPH.out(node, 'AFFECTS'))}.")
+    if tickets and kind != "ticket":
+        parts.append(f"Past incidents: {spoken_list(['bug ' + t.split(':')[1] for t in tickets[-3:]])}.")
+    if notes:
+        parts.append(f"Team notes: {' '.join(notes[-3:])}")
+    if not parts:
+        parts.append(f"I only know that {node} exists.")
+    return Answer(speech=" ".join(parts), details={"node": node, **props, "notes": notes, "tickets": tickets})
+
+
+@mcp.tool(
+    description=(
+        "Save a fact the engineer explicitly asks you to remember, linked to a service, deployment or ticket "
+        "(e.g. 'remember that a rollback fixed checkout last time'). Only call it when the user asks to remember something."
+    ),
+    annotations=WRITE,
+)
+def remember(subject: str, fact: str) -> Answer:
+    node = GRAPH.find(subject) or resolve_service(subject)
+    note = f"note:{len([n for n in GRAPH.nodes if n.startswith('note:')]) + 1}"
+    text = fact.strip().rstrip(".") + "."
+    GRAPH.add_node(note, type="note", text=text, created=time.time())
+    GRAPH.add_edge(note, "ABOUT", node)
+    return Answer(speech=f"Got it. I'll remember that about {node}.", details={"note": note, "about": node, "text": text})
 
 # 4. Arranca en modo Streamable HTTP
 
