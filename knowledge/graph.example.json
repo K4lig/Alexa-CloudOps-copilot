@@ -1,0 +1,122 @@
+{
+ "nodes": {
+  "checkout-api": {
+   "type": "service",
+   "team": "payments-team"
+  },
+  "inventory-svc": {
+   "type": "service",
+   "team": "catalog-team"
+  },
+  "web-frontend": {
+   "type": "service",
+   "team": "web-team"
+  },
+  "legacy-reporting": {
+   "type": "service",
+   "team": "data-team"
+  },
+  "build-agent-image": {
+   "type": "service",
+   "team": "platform-team"
+  },
+  "deploy:482": {
+   "type": "deployment",
+   "reason": "health check failed after release"
+  },
+  "deploy:1290": {
+   "type": "deployment",
+   "reason": "3 unit tests failed"
+  },
+  "CVE-2021-44228": {
+   "type": "cve",
+   "cvss": 10.0,
+   "component": "log4j-core 2.14.1"
+  },
+  "CVE-2024-3094": {
+   "type": "cve",
+   "cvss": 10.0,
+   "component": "xz-utils 5.6.0"
+  },
+  "ticket:4711": {
+   "type": "ticket",
+   "title": "checkout-api degraded",
+   "severity": 2,
+   "created": 1792723564.2301672
+  }
+ },
+ "edges": [
+  [
+   "web-frontend",
+   "DEPENDS_ON",
+   "checkout-api",
+   {}
+  ],
+  [
+   "web-frontend",
+   "DEPENDS_ON",
+   "inventory-svc",
+   {}
+  ],
+  [
+   "checkout-api",
+   "DEPENDS_ON",
+   "inventory-svc",
+   {}
+  ],
+  [
+   "deploy:482",
+   "DEPLOYED_TO",
+   "checkout-api",
+   {}
+  ],
+  [
+   "deploy:1290",
+   "DEPLOYED_TO",
+   "inventory-svc",
+   {}
+  ],
+  [
+   "CVE-2021-44228",
+   "AFFECTS",
+   "legacy-reporting",
+   {}
+  ],
+  [
+   "CVE-2024-3094",
+   "AFFECTS",
+   "build-agent-image",
+   {}
+  ],
+  [
+   "ticket:4711",
+   "ABOUT",
+   "checkout-api",
+   {}
+  ],
+  [
+   "ticket:4711",
+   "CAUSED_BY",
+   "deploy:482",
+   {}
+  ],
+  [
+   "ticket:4711",
+   "ABOUT",
+   "inventory-svc",
+   {}
+  ],
+  [
+   "ticket:4711",
+   "CAUSED_BY",
+   "deploy:1290",
+   {}
+  ],
+  [
+   "ticket:4711",
+   "ABOUT",
+   "web-frontend",
+   {}
+  ]
+ ]
+}
